@@ -96,7 +96,7 @@ async function run() {
       res.send(result);
     });
 
-    app.delete('/delete-loan/:id', async (req,res)=>{
+    app.delete('/delete-loan/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const result = await loansCollection.deleteOne(query);
@@ -107,9 +107,27 @@ async function run() {
 
 
     // application related apis
-    app.get('/my-applications', verifyJWT, async (req, res) => {
-      const email = req.tokenEmail;
-      const result = await applicationCollection.find({ borrowerEmail: email }).toArray();
+    app.get('/applications', verifyJWT, async (req, res) => {
+      const email = req.query.email;
+      const updatedBy = req.query.updatedBy;
+      const status = req.query.status;
+      const query = {};
+      if (email) {
+        query.borrowerEmail = email;
+      }
+      if (updatedBy) {
+        query.updatedBy = updatedBy;
+      }
+      if (status) {
+        query.status = status;
+      }
+      const result = await applicationCollection.find(query).toArray();
+      res.send(result);
+    })
+
+    app.get('/application-details/:id', verifyJWT, async (req, res) => {
+      const id = req.params.id;
+      const result = await applicationCollection.findOne({ _id: new ObjectId(id) });
       res.send(result);
     })
 
@@ -120,14 +138,24 @@ async function run() {
       res.send(result);
     })
 
+    app.patch('/applications/:id', async (req, res) => {
+      const updateData = req.body;
+      updateData.updatedAt = new Date();
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const update = {
+        $set: updateData
+      };
+      const result = await applicationCollection.updateOne(query, update);
+      res.send(result);
+    })
+
     app.delete('/my-applications/:id', async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const result = await applicationCollection.deleteOne(query);
       res.send(result)
     })
-
-
 
 
     // save or update a user in db
