@@ -159,6 +159,12 @@ async function run() {
 
 
     // save or update a user in db
+    // get all users
+    app.get('/users', async (req, res) => {
+      const result = await usersCollection.find().toArray();
+      res.send(result)
+    })
+
     app.post('/users', async (req, res) => {
       const userData = req.body;
       userData.created_at = new Date().toISOString();
@@ -188,6 +194,18 @@ async function run() {
       const email = req.tokenEmail;
       const result = await usersCollection.findOne({ email });
       res.send({ role: result?.role })
+    })
+
+    // update user role
+    app.patch('/user/:id', async (req, res) => {
+      const updateData = req.body;
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const update = {
+        $set: updateData
+      };
+      const result = await usersCollection.updateOne(query, update);
+      res.send(result);
     })
 
 
