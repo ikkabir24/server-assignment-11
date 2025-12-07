@@ -2,6 +2,7 @@ require('dotenv').config()
 const express = require('express')
 const cors = require('cors')
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb')
+const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const admin = require('firebase-admin')
 const port = process.env.PORT || 3000
 const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString(
@@ -54,10 +55,33 @@ const client = new MongoClient(process.env.MONGODB_URI, {
 async function run() {
   try {
     // db collections
-    const db = client.db('loanLinkDB')
-    const loansCollection = db.collection('all-Loans')
-    const applicationCollection = db.collection('loan-application')
-    const usersCollection = db.collection('users')
+    const db = client.db('loanLinkDB');
+    const loansCollection = db.collection('all-Loans');
+    const applicationCollection = db.collection('loan-application');
+    const usersCollection = db.collection('users');
+
+    // role middlewares
+    const verifyADMIN = async (req, res, next) => {
+      const email = req.tokenEmail
+      const user = await usersCollection.findOne({ email })
+      if (user?.role !== 'admin')
+        return res
+          .status(403)
+          .send({ message: 'Admin only Actions!', role: user?.role })
+
+      next()
+    }
+
+    const verifyMANAGER = async (req, res, next) => {
+      const email = req.tokenEmail
+      const user = await usersCollection.findOne({ email })
+      if (user?.role !== 'manager')
+        return res
+          .status(403)
+          .send({ message: 'Manager only Actions!', role: user?.role })
+
+      next()
+    }
 
     // loans related apis
     // all loans
@@ -72,21 +96,22 @@ async function run() {
     })
 
     // get a loan details
-    app.get('/loan/:id', async (req, res) => {
+    app.get('/loan/:id', verifyJWT, async (req, res) => {
       const id = req.params.id;
       const result = await loansCollection.findOne({ _id: new ObjectId(id) });
       res.send(result)
     })
 
-    app.post('/add-loan', async (req, res) => {
+    app.post('/add-loan', verifyJWT, verifyMANAGER, async (req, res) => {
       const loanData = req.body;
       loanData.createdAt = new Date();
       const result = await loansCollection.insertOne(loanData);
       res.send(result);
     })
 
-    app.patch('/update-loan/:id', async (req, res) => {
+    app.patch('/update-loan/:id', verifyJWT, async (req, res) => {
       const updateData = req.body;
+      updateData.updatedAt = new Date();
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const update = {
@@ -96,7 +121,7 @@ async function run() {
       res.send(result);
     });
 
-    app.delete('/delete-loan/:id', async (req, res) => {
+    app.delete('/delete-loan/:id', verifyJWT, async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const result = await loansCollection.deleteOne(query);
@@ -131,14 +156,14 @@ async function run() {
       res.send(result);
     })
 
-    app.post('/applications', async (req, res) => {
+    app.post('/applications', verifyJWT, async (req, res) => {
       const application = req.body;
       application.appliedAt = new Date();
       const result = await applicationCollection.insertOne(application);
       res.send(result);
     })
 
-    app.patch('/applications/:id', async (req, res) => {
+    app.patch('/applications/:id', verifyJWT, async (req, res) => {
       const updateData = req.body;
       updateData.updatedAt = new Date();
       const id = req.params.id;
@@ -150,7 +175,7 @@ async function run() {
       res.send(result);
     })
 
-    app.delete('/my-applications/:id', async (req, res) => {
+    app.delete('/my-applications/:id', verifyJWT, async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const result = await applicationCollection.deleteOne(query);
@@ -197,7 +222,7 @@ async function run() {
     })
 
     // update user role
-    app.patch('/user/:id', async (req, res) => {
+    app.patch('/user/:id', verifyJWT, verifyADMIN, async (req, res) => {
       const updateData = req.body;
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
@@ -207,6 +232,97 @@ async function run() {
       const result = await usersCollection.updateOne(query, update);
       res.send(result);
     })
+
+    // loan card apis for home screen
+    app.get('/loan-cards-display', async (req, res) => {
+      const query = { showOnHome: true };
+      const result = await loansCollection
+        .find(query)
+        .sort({ updatedAt: -1 })
+        .limit(6)
+        .toArray();
+      res.send(result);
+    })
+
+
+
+
+    // payment related apis
+    app.post('/create-checkout-session', async (req, res) => {
+      try {
+        const paymentInfo = req.body;
+
+        const session = await stripe.checkout.sessions.create({
+          line_items: [
+            {
+              price_data: {
+                currency: 'USD',
+                unit_amount: 1000,
+                product_data: {
+                  name: paymentInfo.loanTitle,
+                },
+              },
+              quantity: 1,
+            },
+          ],
+          customer_email: paymentInfo.borrowerEmail,
+          mode: 'payment',
+          metadata: {
+            applicationID: paymentInfo.applicationID,
+            loanID: paymentInfo.loanID,
+          },
+          success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+        });
+
+        res.send({ url: session.url });
+        console.log(session);
+      } catch (error) {
+        console.error("Stripe Checkout Error:", error);
+        res.status(500).send({ message: "Stripe session creation failed", error });
+      }
+    });
+
+
+    app.patch('/payment-success', async (req, res) => {
+      try {
+        const sessionId = req.query.session_id;
+
+        if (!sessionId) {
+          return res.status(400).send({ success: false, message: "Missing session_id" });
+        }
+
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+        if (session.payment_status === 'paid') {
+          const id = session.metadata.applicationID;
+          const transactionId = session.payment_intent;
+
+          const query = { _id: new ObjectId(id) };
+          const update = {
+            $set: {
+              applicationFee: 'paid',
+              feePaidAt: new Date(),
+              transactionId
+            }
+          };
+
+          const result = await applicationCollection.updateOne(query, update);
+
+          return res.send({
+            success: true,
+            transactionId: session.payment_intent,
+            modifyParcel: result,
+          });
+        }
+
+        return res.send({ success: false, message: "Payment not completed" });
+
+      } catch (error) {
+        console.error("Payment success patch error:", error);
+        res.status(500).send({ success: false, error: error.message });
+      }
+    });
 
 
 
